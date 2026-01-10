@@ -31,6 +31,9 @@ LLM_MODEL = os.getenv("LLM_MODEL", "gemini-2.5-flash")  # Can override via .env
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.0"))  # deterministic for baseline
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "500"))  # limit response length
 
+# Memory Management
+CONTEXT_MAX_TOKENS = int(os.getenv("CONTEXT_MAX_TOKENS", "2000"))  # max tokens for input context
+
 # Vector Database
 VECTOR_DB_TYPE = "faiss"  # or "chroma"
 VECTOR_DB_PATH = "./data/vector_db"  # where to store/load vectors
