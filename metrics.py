@@ -89,6 +89,9 @@ class MetricsLogger:
         
         with open(output_file, 'a', encoding='utf-8') as f:
             f.write(json.dumps(metrics, ensure_ascii=False) + '\n')
+        
+        # Optional: Print confirmation (can be disabled for production)
+        # print(f"[Metrics logged to {output_file}]")
     
     def get_metrics_summary(self) -> Dict:
         """Read all metrics and return summary statistics."""
