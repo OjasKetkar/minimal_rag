@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 import numpy as np
 import faiss
+import tiktoken
 
 from config import TOP_K, SIMILARITY_METRIC, VECTOR_DB_PATH, EMBEDDING_DIM
 from embed import Embedder
@@ -25,6 +26,7 @@ class VectorRetriever:
         self.index = None
         self.chunks = []  # Store chunks in same order as index
         self.embedder = Embedder()
+        self.encoding = tiktoken.get_encoding("cl100k_base")
     
     def build_index(self, chunks_with_embeddings: List[Dict]):
         """
@@ -48,10 +50,16 @@ class VectorRetriever:
         # Store chunks in same order
         self.chunks = chunks_with_embeddings.copy()
     
-    def retrieve(self, query: str, top_k: int = None) -> List[Dict]:
+    def retrieve(self, query: str, top_k: int = None, memory_manager=None, record_context_tokens: bool = True) -> List[Dict]:
         """
         Retrieve top-K most similar chunks for a query.
         Returns chunks with similarity scores.
+        
+        Args:
+            query: Query string
+            top_k: Number of chunks to retrieve
+            memory_manager: Optional MemoryManager instance for tracking memory usage
+            record_context_tokens: Whether to record context tokens for retrieved chunks (default: True)
         """
         if self.index is None:
             raise ValueError("Index not built. Call build_index() first.")
@@ -66,6 +74,11 @@ class VectorRetriever:
         # Normalize query embedding
         faiss.normalize_L2(query_embedding)
         
+        # Track query tokens
+        if memory_manager is not None:
+            query_token_count = len(self.encoding.encode(query))
+            memory_manager.record("query", query_token_count)
+        
         # Search
         similarities, indices = self.index.search(query_embedding, top_k)
         
@@ -74,8 +87,18 @@ class VectorRetriever:
         for i, idx in enumerate(indices[0]):
             if idx < len(self.chunks):
                 chunk = self.chunks[idx].copy()
-                chunk["similarity_score"] = float(similarities[0][i])
+                similarity = float(similarities[0][i])
+                chunk["similarity_score"] = similarity
                 retrieved.append(chunk)
+                
+                # Track context tokens for each retrieved chunk (if enabled)
+                if memory_manager is not None and record_context_tokens:
+                    chunk_token_count = len(self.encoding.encode(chunk["text"]))
+                    memory_manager.record(
+                        "context",
+                        chunk_token_count,
+                        metadata={"chunk_id": idx, "score": similarity}
+                    )
         
         return retrieved
     
@@ -112,8 +135,14 @@ class VectorRetriever:
             self.chunks = pickle.load(f)
 
 
-def retrieve_chunks(query: str, retriever: VectorRetriever, top_k: int = None) -> List[Dict]:
+def retrieve_chunks(query: str, retriever: VectorRetriever, top_k: int = None, memory_manager=None) -> List[Dict]:
     """
     Convenience function to retrieve chunks for a query.
+    
+    Args:
+        query: Query string
+        retriever: VectorRetriever instance
+        top_k: Number of chunks to retrieve
+        memory_manager: Optional MemoryManager instance for tracking memory usage
     """
-    return retriever.retrieve(query, top_k)
+    return retriever.retrieve(query, top_k, memory_manager)

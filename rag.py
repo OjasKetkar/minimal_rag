@@ -6,13 +6,15 @@ Coordinates all components: ingestion, embedding, retrieval, and LLM generation.
 import time
 from pathlib import Path
 from typing import List, Dict, Optional
+import tiktoken
 
-from config import DOCUMENTS_DIR, VECTOR_DB_PATH
+from config import DOCUMENTS_DIR, VECTOR_DB_PATH, CONTEXT_MAX_TOKENS
 from ingest import ingest_documents
 from embed import create_embeddings
 from retrieve import VectorRetriever
 from llm import LLMInterface
 from metrics import MetricsLogger
+from memory_manager import MemoryManager
 
 
 class MinimalRAG:
@@ -95,22 +97,45 @@ class MinimalRAG:
         """
         start_time = time.time()
         
-        # Retrieve relevant chunks
-        retrieved_chunks = self.retriever.retrieve(query, top_k)
+        # Initialize memory manager for token budget tracking
+        memory_manager = MemoryManager(max_tokens=CONTEXT_MAX_TOKENS)
+        encoding = tiktoken.get_encoding("cl100k_base")
         
-        # Generate answer
-        answer = self.llm.generate(query, retrieved_chunks)
+        # Retrieve relevant chunks (tracks query tokens, but not context tokens yet)
+        retrieved_chunks = self.retriever.retrieve(query, top_k, memory_manager=memory_manager, record_context_tokens=False)
+        
+        # Filter chunks based on remaining token budget
+        # Only include chunks that fit within the budget
+        filtered_chunks = []
+        for chunk in retrieved_chunks:
+            chunk_token_count = len(encoding.encode(chunk["text"]))
+            remaining = memory_manager.remaining_budget()
+            
+            if chunk_token_count <= remaining:
+                filtered_chunks.append(chunk)
+                # Record context tokens only for chunks that fit within budget
+                memory_manager.record(
+                    "context",
+                    chunk_token_count,
+                    metadata={"chunk_id": chunk.get("chunk_index", -1), "score": chunk.get("similarity_score", 0.0)}
+                )
+            else:
+                # Chunk doesn't fit in remaining budget - stop adding chunks
+                break
+        
+        # Generate answer using only filtered chunks that fit within budget
+        answer = self.llm.generate(query, filtered_chunks)
         
         # Calculate latency
         latency = time.time() - start_time
         
-        # Get prompt for metrics
-        prompt = self.llm.build_prompt(query, retrieved_chunks)
+        # Get prompt for metrics (using filtered chunks)
+        prompt = self.llm.build_prompt(query, filtered_chunks)
         
         # Log metrics
         metrics = self.metrics.log_query(
             query=query,
-            retrieved_chunks=retrieved_chunks,
+            retrieved_chunks=filtered_chunks,
             prompt=prompt,
             answer=answer,
             latency=latency
@@ -119,8 +144,9 @@ class MinimalRAG:
         return {
             "query": query,
             "answer": answer,
-            "retrieved_chunks": retrieved_chunks,
-            "metrics": metrics
+            "retrieved_chunks": filtered_chunks,
+            "metrics": metrics,
+            "memory_snapshot": memory_manager.snapshot()
         }
     
     def get_metrics_summary(self) -> Dict:
