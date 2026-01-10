@@ -25,7 +25,7 @@ EMBEDDING_DIM = 384  # dimension for the chosen model
 
 # LLM Configuration
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")  # Default: gemini
-# Common Gemini models: gemini-1.5-flash, gemini-1.5-pro, gemini-2.0-flash-exp
+# Common Gemini models: gemini-2.5-flash, gemini-2.5-pro, gemini-2.0-flash-exp
 # Check https://ai.google.dev/models/gemini or run: poetry run python list_models.py
 LLM_MODEL = os.getenv("LLM_MODEL", "gemini-2.5-flash")  # Can override via .env
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.0"))  # deterministic for baseline

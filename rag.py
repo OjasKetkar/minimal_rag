@@ -159,10 +159,19 @@ def interactive_mode():
             print(result["answer"])
             print("="*70)
             
-            # Display metrics (optional - can be toggled)
-            print(f"\n[Latency: {result['metrics']['latency_seconds']:.2f}s | "
-                  f"Chunks: {result['metrics']['num_retrieved_chunks']} | "
-                  f"Tokens: {result['metrics']['prompt_tokens']}]")
+            # Display metrics
+            metrics = result['metrics']
+            print("\n" + "="*70)
+            print("METRICS (logged to data/metrics.jsonl):")
+            print("="*70)
+            print(f"Query tokens:        {metrics['query_tokens']}")
+            print(f"Retrieved chunks:    {metrics['num_retrieved_chunks']}")
+            print(f"Context tokens:       {metrics['context_tokens']}")
+            print(f"Prompt tokens:       {metrics['prompt_tokens']}")
+            print(f"Answer tokens:       {metrics['answer_tokens']}")
+            print(f"Total tokens:        {metrics['prompt_tokens'] + metrics['answer_tokens']}")
+            print(f"Latency:             {metrics['latency_seconds']:.2f}s")
+            print("="*70)
             print()
             
         except KeyboardInterrupt:
@@ -187,12 +196,17 @@ def main():
     print("="*50)
     print("\nANSWER:")
     print(result["answer"])
+    metrics = result['metrics']
     print("\n" + "="*50)
-    print("METRICS:")
-    print(f"Latency: {result['metrics']['latency_seconds']:.2f}s")
-    print(f"Retrieved chunks: {result['metrics']['num_retrieved_chunks']}")
-    print(f"Context tokens: {result['metrics']['context_tokens']}")
-    print(f"Prompt tokens: {result['metrics']['prompt_tokens']}")
+    print("METRICS (logged to data/metrics.jsonl):")
+    print("="*50)
+    print(f"Query tokens:        {metrics['query_tokens']}")
+    print(f"Retrieved chunks:    {metrics['num_retrieved_chunks']}")
+    print(f"Context tokens:      {metrics['context_tokens']}")
+    print(f"Prompt tokens:       {metrics['prompt_tokens']}")
+    print(f"Answer tokens:       {metrics['answer_tokens']}")
+    print(f"Total tokens:        {metrics['prompt_tokens'] + metrics['answer_tokens']}")
+    print(f"Latency:             {metrics['latency_seconds']:.2f}s")
     print("="*50)
 
 

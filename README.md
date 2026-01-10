@@ -12,6 +12,19 @@ This implementation serves as a baseline RAG system with static memory behavior,
 - Provide a control group for memory-aware system comparisons
 - Enable analysis of memory behavior under static conditions
 
+## Quick Reference: Baseline Parameters
+
+| Parameter | Value |
+|-----------|-------|
+| **Chunk size** | 500 tokens |
+| **Chunk overlap** | 50 tokens |
+| **Top-K retrieval** | 5 chunks |
+| **LLM Model** | gemini-2.5-flash |
+| **Temperature** | 0.0 |
+| **Max output tokens** | 500 |
+| **No agents** | ✅ Single-pass only |
+| **No memory optimization** | ✅ Static behavior |
+
 ## Architecture
 
 ```
@@ -123,20 +136,52 @@ Edit `config.py` to adjust:
 - LLM model (gemini-2.5-flash, gemini-2.5-pro, or gemini-2.0-flash-exp)
 - Vector database settings
 
-## Metrics
+## Metrics Logging
 
-Metrics are logged to `data/metrics.jsonl` (JSON Lines format) and include:
-- Query tokens
-- Retrieved context tokens
-- Total prompt tokens
-- Answer tokens
-- Latency
-- Retrieved sources
+**All queries are automatically logged to `data/metrics.jsonl` (JSON Lines format).**
 
-View summary:
+### Logged Metrics (Per Query)
+- **Query tokens:** Number of tokens in the user query
+- **Number of retrieved chunks:** Always 5 (Top-K=5)
+- **Retrieved context tokens:** Total tokens in all retrieved chunks
+- **Total prompt tokens:** Query + context tokens sent to LLM
+- **Answer tokens:** Number of tokens in the LLM response
+- **Latency (seconds):** End-to-end query processing time
+- **Retrieved sources:** File names and chunk indices of retrieved chunks
+
+### View Metrics Summary
 ```python
-rag.get_metrics_summary()
+rag = MinimalRAG()
+summary = rag.get_metrics_summary()
+print(summary)
+# Output:
+# {
+#   "total_queries": 10,
+#   "avg_latency_seconds": 1.23,
+#   "avg_context_tokens": 2450,
+#   "avg_prompt_tokens": 2500,
+#   "avg_answer_tokens": 150
+# }
 ```
+
+### Metrics File Format
+Each line in `data/metrics.jsonl` is a JSON object:
+```json
+{
+  "timestamp": "2024-01-15T10:30:00",
+  "query": "What is the main topic?",
+  "query_tokens": 5,
+  "num_retrieved_chunks": 5,
+  "context_tokens": 2450,
+  "prompt_tokens": 2500,
+  "answer_tokens": 150,
+  "answer_length": 450,
+  "latency_seconds": 1.23,
+  "retrieved_sources": [...]
+}
+```
+
+**These metrics enable analysis of baseline token consumption and performance for comparison studies.**
 
 ## Project Structure
 
@@ -166,6 +211,38 @@ minimal_rag/
 - **Embeddings:** sentence-transformers
 - **Vector DB:** FAISS
 - **Chunking:** Fixed-size (intentionally naive)
+
+## Baseline Assumptions (Exact Parameters)
+
+**This section documents the exact system parameters for reproducibility and comparison.**
+
+### Chunking Configuration
+- **Static chunk size:** 500 tokens
+- **Chunk overlap:** 50 tokens
+- **Chunking strategy:** Fixed-size, no adaptive sizing
+
+### Retrieval Configuration
+- **Top-K retrieval:** 5 chunks (hardcoded, no dynamic adjustment)
+- **Similarity metric:** Cosine similarity
+- **No re-ranking:** Direct vector search results
+
+### LLM Configuration
+- **Model:** `gemini-2.5-flash` (default, configurable via `.env`)
+- **Temperature:** 0.0 (deterministic for baseline)
+- **Max output tokens:** 500 tokens
+
+### System Constraints
+- **No agents:** Single-pass query processing
+- **No memory optimization:** No summarization, no context compression
+- **No multi-step reasoning:** Single query → single response
+- **No adaptive retrieval:** Fixed K=5 regardless of query complexity
+
+### Embedding Configuration
+- **Model:** `sentence-transformers/all-MiniLM-L6-v2`
+- **Dimension:** 384
+- **Vector DB:** FAISS (CPU)
+
+**These exact parameters enable reproducible baseline measurements for comparison with memory-aware architectures.**
 
 ## Research Context
 
