@@ -3,6 +3,14 @@ Configuration settings for minimal RAG baseline system.
 All parameters are intentionally static and naive for baseline comparison.
 """
 
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path)
+
 # Document Processing
 CHUNK_SIZE = 500  # tokens per chunk
 CHUNK_OVERLAP = 50  # tokens overlap between chunks
@@ -16,10 +24,12 @@ EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # lightweight, prove
 EMBEDDING_DIM = 384  # dimension for the chosen model
 
 # LLM Configuration
-LLM_PROVIDER = "openai"  # or "llama" for local models
-LLM_MODEL = "gpt-3.5-turbo"  # swappable model
-LLM_TEMPERATURE = 0.0  # deterministic for baseline
-LLM_MAX_TOKENS = 500  # limit response length
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")  # Default: gemini
+# Common Gemini models: gemini-1.5-flash, gemini-1.5-pro, gemini-2.0-flash-exp
+# Check https://ai.google.dev/models/gemini or run: poetry run python list_models.py
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini-2.5-flash")  # Can override via .env
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.0"))  # deterministic for baseline
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "500"))  # limit response length
 
 # Vector Database
 VECTOR_DB_TYPE = "faiss"  # or "chroma"
