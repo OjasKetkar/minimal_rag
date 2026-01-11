@@ -104,24 +104,72 @@ class MinimalRAG:
         # Retrieve relevant chunks (tracks query tokens, but not context tokens yet)
         retrieved_chunks = self.retriever.retrieve(query, top_k, memory_manager=memory_manager, record_context_tokens=False)
         
+        # Sort chunks by similarity score (descending) - highest similarity first
+        # This ensures we prioritize the most relevant chunks when memory is limited
+        retrieved_chunks.sort(key=lambda x: x.get("similarity_score", 0.0), reverse=True)
+        
+        # Calculate prompt overhead tokens (header + footer with query)
+        # This matches what build_prompt will use
+        prompt_header = (
+            "Answer the following question using the provided context.\n"
+            "If the context does not contain enough information, say so.\n\n"
+            "Context:\n"
+        )
+        prompt_footer = f"\n\nQuestion: {query}\n\nAnswer:"
+        header_tokens = len(encoding.encode(prompt_header))
+        footer_tokens = len(encoding.encode(prompt_footer))
+        prompt_overhead = header_tokens + footer_tokens
+        
+        # Available tokens for context chunks = total budget - prompt overhead
+        # Note: query tokens are already recorded in memory_manager, but footer includes query
+        # So we use CONTEXT_MAX_TOKENS directly and subtract overhead
+        available_for_chunks = CONTEXT_MAX_TOKENS - prompt_overhead
+        if available_for_chunks <= 0:
+            raise ValueError(f"CONTEXT_MAX_TOKENS ({CONTEXT_MAX_TOKENS}) too small for prompt structure (overhead: {prompt_overhead})")
+        
         # Filter chunks based on remaining token budget
-        # Only include chunks that fit within the budget
+        # Account for formatting tokens that build_prompt will add: "[Context {i}]\n" and "\n"
         filtered_chunks = []
-        for chunk in retrieved_chunks:
-            chunk_token_count = len(encoding.encode(chunk["text"]))
-            remaining = memory_manager.remaining_budget()
+        used_context_tokens = 0
+        
+        for i, chunk in enumerate(retrieved_chunks, 1):
+            # Count tokens including the formatting that build_prompt will add
+            chunk_text_with_formatting = f"[Context {i}]\n{chunk['text']}\n"
+            chunk_token_count = len(encoding.encode(chunk_text_with_formatting))
             
-            if chunk_token_count <= remaining:
+            if used_context_tokens + chunk_token_count <= available_for_chunks:
                 filtered_chunks.append(chunk)
-                # Record context tokens only for chunks that fit within budget
+                used_context_tokens += chunk_token_count
+                # Record context tokens (just the chunk text, not formatting, for memory_manager tracking)
+                chunk_text_only_tokens = len(encoding.encode(chunk["text"]))
                 memory_manager.record(
                     "context",
-                    chunk_token_count,
+                    chunk_text_only_tokens,
                     metadata={"chunk_id": chunk.get("chunk_index", -1), "score": chunk.get("similarity_score", 0.0)}
                 )
             else:
                 # Chunk doesn't fit in remaining budget - stop adding chunks
+                # Lower similarity chunks are dropped first
                 break
+        
+        # Calculate evidence strength: average similarity score of used chunks
+        # Normalize to 0-1 range (FAISS cosine similarity is already 0-1 for normalized vectors)
+        # Calculate evidence strength from retrieved chunks BEFORE budget filtering
+        if retrieved_chunks:
+            similarity_scores = [
+                chunk.get("similarity_score", 0.0)
+                for chunk in retrieved_chunks
+                if chunk.get("similarity_score") is not None
+            ]
+
+            # Evidence = strongest grounding signal
+            evidence_score = max(similarity_scores) if similarity_scores else 0.0
+        else:
+            evidence_score = 0.0
+
+        # Clamp for safety
+        evidence_score = max(0.0, min(1.0, evidence_score))
+
         
         # Generate answer using only filtered chunks that fit within budget
         answer = self.llm.generate(query, filtered_chunks)
@@ -130,7 +178,8 @@ class MinimalRAG:
         latency = time.time() - start_time
         
         # Get prompt for metrics (using filtered chunks)
-        prompt = self.llm.build_prompt(query, filtered_chunks)
+        # Pass CONTEXT_MAX_TOKENS to ensure build_prompt enforces the same limit
+        prompt = self.llm.build_prompt(query, filtered_chunks, max_tokens=CONTEXT_MAX_TOKENS)
         
         # Log metrics
         metrics = self.metrics.log_query(
@@ -138,7 +187,8 @@ class MinimalRAG:
             retrieved_chunks=filtered_chunks,
             prompt=prompt,
             answer=answer,
-            latency=latency
+            latency=latency,
+            metadata={"evidence_score": evidence_score}
         )
         
         return {
@@ -146,7 +196,8 @@ class MinimalRAG:
             "answer": answer,
             "retrieved_chunks": filtered_chunks,
             "metrics": metrics,
-            "memory_snapshot": memory_manager.snapshot()
+            "memory_snapshot": memory_manager.snapshot(),
+            "evidence_score": evidence_score
         }
     
     def get_metrics_summary(self) -> Dict:
@@ -187,6 +238,7 @@ def interactive_mode():
             
             # Display metrics
             metrics = result['metrics']
+            evidence_score = result.get('evidence_score', 0.0)
             print("\n" + "="*70)
             print("METRICS (logged to data/metrics.jsonl):")
             print("="*70)
@@ -196,6 +248,7 @@ def interactive_mode():
             print(f"Prompt tokens:       {metrics['prompt_tokens']}")
             print(f"Answer tokens:       {metrics['answer_tokens']}")
             print(f"Total tokens:        {metrics['prompt_tokens'] + metrics['answer_tokens']}")
+            print(f"Evidence score:      {evidence_score:.3f}")
             print(f"Latency:             {metrics['latency_seconds']:.2f}s")
             print("="*70)
             print()
@@ -223,6 +276,7 @@ def main():
     print("\nANSWER:")
     print(result["answer"])
     metrics = result['metrics']
+    evidence_score = result.get('evidence_score', 0.0)
     print("\n" + "="*50)
     print("METRICS (logged to data/metrics.jsonl):")
     print("="*50)
@@ -232,6 +286,7 @@ def main():
     print(f"Prompt tokens:       {metrics['prompt_tokens']}")
     print(f"Answer tokens:       {metrics['answer_tokens']}")
     print(f"Total tokens:        {metrics['prompt_tokens'] + metrics['answer_tokens']}")
+    print(f"Evidence score:      {evidence_score:.3f}")
     print(f"Latency:             {metrics['latency_seconds']:.2f}s")
     print("="*50)
 
