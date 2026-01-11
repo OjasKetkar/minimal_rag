@@ -1,152 +1,153 @@
 """
 LLM interface module for minimal RAG baseline.
-Handles prompt assembly and LLM API calls via Google Gemini.
+Handles prompt assembly and LLM API calls via OpenRouter.
 """
 
 import os
-from typing import List, Dict, Optional
+import json
+import requests
+from typing import List, Dict
 
-from config import LLM_PROVIDER, LLM_MODEL, LLM_TEMPERATURE, LLM_MAX_TOKENS
+import tiktoken
+
+from config import LLM_MODEL, LLM_TEMPERATURE, LLM_MAX_TOKENS, CONTEXT_MAX_TOKENS
 
 
 class LLMInterface:
-    """Simple LLM interface for baseline RAG using Google Gemini API."""
-    
-    def __init__(self, provider: str = None, model: str = None, temperature: float = None, max_tokens: int = None):
-        """Initialize LLM with configuration."""
-        self.provider = provider or LLM_PROVIDER
+    """Simple LLM interface for baseline RAG using OpenRouter."""
+
+    def __init__(
+        self,
+        model: str = None,
+        temperature: float = None,
+        max_tokens: int = None,
+    ):
         self.model = model or LLM_MODEL
         self.temperature = temperature if temperature is not None else LLM_TEMPERATURE
         self.max_tokens = max_tokens or LLM_MAX_TOKENS
-        
-        if self.provider == "gemini":
-            self._init_gemini()
-        else:
-            raise ValueError(f"Unsupported LLM provider: {self.provider}. Only 'gemini' is supported.")
-    
-    def _init_gemini(self):
-        """Initialize Google Gemini client."""
-        try:
-            import google.generativeai as genai
-            
-            api_key = os.getenv("GEMINI_API_KEY")
-            if not api_key:
-                raise ValueError("GEMINI_API_KEY environment variable not set. Please set it in your .env file.")
-            
-            genai.configure(api_key=api_key)
-            self.genai = genai  # Store for later use
-            self.model_name = self.model  # Store model name
-            
-            # Get available models
-            try:
-                self._available_models = self._get_available_models()
-            except:
-                self._available_models = None
-        except ImportError:
-            raise ImportError("google-generativeai package required. Install with: pip install google-generativeai")
-        except Exception as e:
-            raise ValueError(f"Failed to initialize Gemini client: {e}")
-    
-    def _get_available_models(self):
-        """Get list of available Gemini models."""
-        try:
-            import google.generativeai as genai
-            # Get actual available models from API
-            models = genai.list_models()
-            available = []
-            for model in models:
-                if 'generateContent' in model.supported_generation_methods:
-                    model_name = model.name.replace('models/', '')
-                    available.append(model_name)
-            return available if available else None
-        except:
-            # Fallback to common models if API call fails
-            return [
-                "gemini-2.5-flash",
-                "gemini-2.5-pro",
-                "gemini-2.0-flash-exp",
-                "gemini-2.0-flash",
-                "gemini-flash-latest",
-                "gemini-pro-latest"
-            ]
-    
-    def build_prompt(self, query: str, retrieved_chunks: List[Dict]) -> str:
-        """
-        Build prompt from query and retrieved chunks.
-        Simple, naive prompt assembly - no optimization.
-        """
-        context_parts = []
-        for i, chunk in enumerate(retrieved_chunks, 1):
-            context_parts.append(f"[Context {i}]\n{chunk['text']}\n")
-        
-        context = "\n".join(context_parts)
-        
-        prompt = f"""Answer the following question using the provided context. If the context doesn't contain enough information to answer, say so.
 
-Context:
-{context}
+        # Single tokenizer source of truth
+        self.encoding = tiktoken.get_encoding("cl100k_base")
 
-Question: {query}
+        self._init_openrouter()
 
-Answer:"""
-        
-        return prompt
-    
-    def generate(self, query: str, retrieved_chunks: List[Dict]) -> str:
-        """
-        Generate response using LLM.
-        Returns the generated text.
-        """
-        if self.provider == "gemini":
-            return self._generate_gemini(query, retrieved_chunks)
-        else:
-            raise ValueError(f"Unsupported provider: {self.provider}")
-    
-    def _generate_gemini(self, query: str, retrieved_chunks: List[Dict]) -> str:
-        """Generate response using Google Gemini API."""
-        prompt = self.build_prompt(query, retrieved_chunks)
-        
-        try:
-            import google.generativeai as genai
-            
-            # Create generation config
-            generation_config = {
-                "temperature": self.temperature,
-                "max_output_tokens": self.max_tokens,
-            }
-            
-            # Create model instance
-            model = genai.GenerativeModel(
-                model_name=self.model_name,
-                generation_config=generation_config
+    # ------------------------------------------------------------------
+    # OpenRouter initialization
+    # ------------------------------------------------------------------
+
+    def _init_openrouter(self):
+        self.api_key = os.getenv("OPENROUTER_API_KEY")
+        if not self.api_key:
+            raise ValueError(
+                "OPENROUTER_API_KEY environment variable not set. "
+                "Please set it in your .env file."
             )
-            
-            # Generate response
-            response = model.generate_content(prompt)
-            
-            return response.text.strip()
-        except Exception as e:
-            error_msg = str(e)
-            if "model" in error_msg.lower() or "not found" in error_msg.lower():
-                available = getattr(self, '_available_models', None)
-                if available:
-                    models_list = "\n  - ".join(available)
-                    raise ValueError(
-                        f"Model '{self.model}' not found or not available.\n\n"
-                        f"Try these available models:\n  - {models_list}\n\n"
-                        f"Update LLM_MODEL in your .env file. Example:\n"
-                        f"  LLM_MODEL=gemini-2.5-flash\n\n"
-                        f"Or run: poetry run python list_models.py to see all available models.\n"
-                        f"Check https://ai.google.dev/models/gemini for the latest models.\n"
-                        f"Original error: {error_msg}"
-                    )
-                else:
-                    raise ValueError(
-                        f"Model '{self.model}' not found or not available.\n"
-                        f"Common models to try: gemini-2.5-flash, gemini-2.5-pro, gemini-2.0-flash-exp\n"
-                        f"Run: poetry run python list_models.py to see all available models.\n"
-                        f"Update LLM_MODEL in your .env file or check https://ai.google.dev/models/gemini\n"
-                        f"Original error: {error_msg}"
-                    )
-            raise
 
+        self.site_url = os.getenv("OPENROUTER_SITE_URL", "")
+        self.site_name = os.getenv("OPENROUTER_SITE_NAME", "")
+
+        self.endpoint = "https://openrouter.ai/api/v1/chat/completions"
+
+    # ------------------------------------------------------------------
+    # Prompt construction (HARD token enforcement)
+    # ------------------------------------------------------------------
+
+    def build_prompt(self, query: str, retrieved_chunks: List[Dict], max_tokens: int = None) -> str:
+        """
+        Build prompt while strictly enforcing token limit.
+        
+        Args:
+            query: User query string
+            retrieved_chunks: List of retrieved chunk dictionaries
+            max_tokens: Maximum tokens for the entire prompt (defaults to CONTEXT_MAX_TOKENS)
+        """
+
+        # Use provided max_tokens or fall back to CONTEXT_MAX_TOKENS
+        token_limit = max_tokens if max_tokens is not None else CONTEXT_MAX_TOKENS
+
+        # Fixed prompt overhead
+        prompt_header = (
+            "Answer the following question using the provided context.\n"
+            "If the context does not contain enough information, say so.\n\n"
+            "Context:\n"
+        )
+
+        prompt_footer = f"\n\nQuestion: {query}\n\nAnswer:"
+
+        header_tokens = len(self.encoding.encode(prompt_header))
+        footer_tokens = len(self.encoding.encode(prompt_footer))
+
+        available_tokens = token_limit - header_tokens - footer_tokens
+        if available_tokens <= 0:
+            raise ValueError(f"Token limit ({token_limit}) too small to fit prompt structure (header: {header_tokens}, footer: {footer_tokens}).")
+
+        context_parts = []
+        used_tokens = 0
+
+        for i, chunk in enumerate(retrieved_chunks, 1):
+            chunk_text = f"[Context {i}]\n{chunk['text']}\n"
+            chunk_tokens = len(self.encoding.encode(chunk_text))
+
+            if used_tokens + chunk_tokens > available_tokens:
+                break
+
+            context_parts.append(chunk_text)
+            used_tokens += chunk_tokens
+
+        context = "\n".join(context_parts)
+
+        final_prompt = f"{prompt_header}{context}{prompt_footer}"
+
+        # Absolute safety check (never exceed)
+        total_tokens = len(self.encoding.encode(final_prompt))
+        if total_tokens > token_limit:
+            # Last-resort truncation (should almost never trigger)
+            encoded = self.encoding.encode(final_prompt)
+            final_prompt = self.encoding.decode(encoded[:token_limit])
+
+        return final_prompt
+
+    # ------------------------------------------------------------------
+    # Generate response
+    # ------------------------------------------------------------------
+
+    def generate(self, query: str, retrieved_chunks: List[Dict]) -> str:
+        prompt = self.build_prompt(query, retrieved_chunks)
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        if self.site_url:
+            headers["HTTP-Referer"] = self.site_url
+        if self.site_name:
+            headers["X-Title"] = self.site_name
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+
+        response = requests.post(
+            self.endpoint,
+            headers=headers,
+            data=json.dumps(payload),
+            timeout=60,
+        )
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"OpenRouter API error {response.status_code}: {response.text}"
+            )
+
+        data = response.json()
+
+        try:
+            return data["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError):
+            raise RuntimeError(f"Malformed OpenRouter response: {data}")
