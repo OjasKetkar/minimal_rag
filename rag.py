@@ -16,6 +16,7 @@ from llm import LLMInterface
 from metrics import MetricsLogger
 from memory_manager import MemoryManager
 
+from config import TOP_K
 
 class MinimalRAG:
     """
@@ -84,19 +85,11 @@ class MinimalRAG:
         
         print("Index built successfully.")
     
-    def query(self, query: str, top_k: int = None) -> Dict:
+    def _run_rag_core(self, query: str, top_k: int = None) -> Dict:
         """
-        Process a query through the RAG pipeline.
-        
-        Args:
-            query: User query string
-            top_k: Number of chunks to retrieve (defaults to config TOP_K)
-        
-        Returns:
-            Dictionary with answer and metadata
+        Core RAG execution logic.
+        Returns answer, evidence_score, filtered_chunks, memory_manager, and other metadata.
         """
-        start_time = time.time()
-        
         # Initialize memory manager for token budget tracking
         memory_manager = MemoryManager(max_tokens=CONTEXT_MAX_TOKENS)
         encoding = tiktoken.get_encoding("cl100k_base")
@@ -169,17 +162,125 @@ class MinimalRAG:
 
         # Clamp for safety
         evidence_score = max(0.0, min(1.0, evidence_score))
-
         
         # Generate answer using only filtered chunks that fit within budget
         answer = self.llm.generate(query, filtered_chunks)
+        
+        return {
+            "answer": answer,
+            "evidence_score": evidence_score,
+            "filtered_chunks": filtered_chunks,
+            "memory_manager": memory_manager,
+            "retrieved_chunks": retrieved_chunks
+        }
+    
+    def query(self, query: str, top_k: int = None) -> Dict:
+        """
+        Process a query through the RAG pipeline with agentic decision-making.
+        
+        Args:
+            query: User query string
+            top_k: Number of chunks to retrieve (defaults to config TOP_K)
+        
+        Returns:
+            Dictionary with answer and metadata
+        """
+        start_time = time.time()
+        
+        # Step 4: Agentic Decision-Making - Dynamic-K policy
+        # Start with K=3, increase to K=6, then K=10 if confidence is low (max 2 retries)
+        CONFIDENCE_THRESHOLD = 0.6
+        
+        # Dynamic-K retry policy: K=3 -> K=6 -> K=10
+        k_sequence = [3, 6, 10]
+        current_k_index = TOP_K
+        
+        # Run initial RAG with K=3
+        initial_k = k_sequence[0]
+        result = self._run_rag_core(query, initial_k)
+        answer = result["answer"]
+        evidence_score = result["evidence_score"]
+        filtered_chunks = result["filtered_chunks"]
+        memory_manager = result["memory_manager"]
+        retrieved_chunks = result["retrieved_chunks"]
+        used_query = query
+        
+        retry_info = None
+        retry_count = 0
+        max_retries = 2
+        
+        while evidence_score < CONFIDENCE_THRESHOLD and retry_count < max_retries:
+            # Move to next K value
+            current_k_index += 1
+            if current_k_index >= len(k_sequence):
+                break  # No more K values to try
+            
+            new_k = k_sequence[current_k_index]
+            retry_count += 1
+            
+            print(f"⚠️ Low confidence detected ({evidence_score:.3f} < {CONFIDENCE_THRESHOLD}). Retrying with K={new_k}...")
+            
+            # Retry with increased K
+            result_retry = self._run_rag_core(query, new_k)
+            evidence_score_retry = result_retry["evidence_score"]
+            
+            print(f"   Retry {retry_count} confidence: {evidence_score_retry:.3f} (previous: {evidence_score:.3f})")
+            
+            # Choose the better result (higher confidence)
+            if evidence_score_retry > evidence_score:
+                improvement = evidence_score_retry - evidence_score
+                print(f"   ✅ Improvement: +{improvement:.3f} (K={new_k})")
+                answer = result_retry["answer"]
+                evidence_score = evidence_score_retry
+                filtered_chunks = result_retry["filtered_chunks"]
+                memory_manager = result_retry["memory_manager"]
+                retrieved_chunks = result_retry["retrieved_chunks"]
+                
+                retry_info = {
+                    "strategy": "dynamic_k",
+                    "original_k": initial_k,
+                    "final_k": new_k,
+                    "original_confidence": result["evidence_score"],
+                    "retry_confidence": evidence_score_retry,
+                    "improved": True,
+                    "improvement": improvement,
+                    "retry_count": retry_count
+                }
+            else:
+                print(f"   ❌ No improvement with K={new_k}. Keeping previous result.")
+                # Track that we tried but didn't improve
+                if retry_info is None:
+                    retry_info = {
+                        "strategy": "dynamic_k",
+                        "original_k": initial_k,
+                        "final_k": new_k,
+                        "original_confidence": result["evidence_score"],
+                        "improved": False,
+                        "improvement": evidence_score_retry - evidence_score,
+                        "retry_count": retry_count
+                    }
+                else:
+                    # Update with latest attempt
+                    retry_info["final_k"] = new_k
+                    retry_info["improvement"] = evidence_score_retry - evidence_score
+                    retry_info["retry_count"] = retry_count
+        
+        # Update retry_info with final confidence if we did retries
+        if retry_info:
+            retry_info["final_confidence"] = evidence_score
+            retry_info["retry_confidence"] = evidence_score  # Final confidence after all retries
+        
+        # Add warning if confidence is still low after retry
+        if evidence_score < CONFIDENCE_THRESHOLD:
+            warning = "\n\n⚠️ This answer may be incomplete due to limited or conflicting context."
+            answer = answer + warning
         
         # Calculate latency
         latency = time.time() - start_time
         
         # Get prompt for metrics (using filtered chunks)
         # Pass CONTEXT_MAX_TOKENS to ensure build_prompt enforces the same limit
-        prompt = self.llm.build_prompt(query, filtered_chunks, max_tokens=CONTEXT_MAX_TOKENS)
+        prompt = self.llm.build_prompt(used_query, filtered_chunks, max_tokens=CONTEXT_MAX_TOKENS)
         
         # Log metrics
         metrics = self.metrics.log_query(
@@ -191,7 +292,7 @@ class MinimalRAG:
             metadata={"evidence_score": evidence_score}
         )
         
-        return {
+        result = {
             "query": query,
             "answer": answer,
             "retrieved_chunks": filtered_chunks,
@@ -199,6 +300,11 @@ class MinimalRAG:
             "memory_snapshot": memory_manager.snapshot(),
             "evidence_score": evidence_score
         }
+        
+        if retry_info:
+            result["retry_info"] = retry_info
+        
+        return result
     
     def get_metrics_summary(self) -> Dict:
         """Get summary statistics of all logged queries."""
@@ -239,6 +345,7 @@ def interactive_mode():
             # Display metrics
             metrics = result['metrics']
             evidence_score = result.get('evidence_score', 0.0)
+            retry_info = result.get('retry_info')
             print("\n" + "="*70)
             print("METRICS (logged to data/metrics.jsonl):")
             print("="*70)
@@ -249,6 +356,18 @@ def interactive_mode():
             print(f"Answer tokens:       {metrics['answer_tokens']}")
             print(f"Total tokens:        {metrics['prompt_tokens'] + metrics['answer_tokens']}")
             print(f"Evidence score:      {evidence_score:.3f}")
+            if retry_info:
+                print(f"\n🔄 AGENTIC RETRY (Dynamic-K):")
+                print(f"   Strategy:            {retry_info.get('strategy', 'dynamic_k')}")
+                print(f"   Original K:          {retry_info.get('original_k', 'N/A')}")
+                print(f"   Final K:             {retry_info.get('final_k', 'N/A')}")
+                print(f"   Retries:             {retry_info.get('retry_count', 0)}")
+                print(f"   Original confidence: {retry_info['original_confidence']:.3f}")
+                print(f"   Final confidence:    {retry_info.get('final_confidence', retry_info['retry_confidence']):.3f}")
+                if retry_info['improved']:
+                    print(f"   ✅ Improved by:      +{retry_info['improvement']:.3f}")
+                else:
+                    print(f"   ❌ No improvement:    {retry_info['improvement']:.3f}")
             print(f"Latency:             {metrics['latency_seconds']:.2f}s")
             print("="*70)
             print()
