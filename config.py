@@ -16,7 +16,7 @@ CHUNK_SIZE = 500  # tokens per chunk
 CHUNK_OVERLAP = 50  # tokens overlap between chunks
 
 # Retrieval Settings
-TOP_K = 5  # number of chunks to retrieve (hardcoded, no dynamic adjustment)
+TOP_K = 3  # number of chunks to retrieve (hardcoded, no dynamic adjustment)
 SIMILARITY_METRIC = "cosine"  # fixed similarity metric
 
 # Embedding Configuration
