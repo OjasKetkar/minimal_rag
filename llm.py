@@ -1,20 +1,20 @@
 """
 LLM interface module for minimal RAG baseline.
-Handles prompt assembly and LLM API calls via OpenRouter.
+Handles prompt assembly and LLM API calls via Gemini.
 """
 
 import os
-import json
-import requests
 from typing import List, Dict
 
 import tiktoken
+from google import genai
+from google.genai import types
 
 from config import LLM_MODEL, LLM_TEMPERATURE, LLM_MAX_TOKENS, CONTEXT_MAX_TOKENS
 
 
 class LLMInterface:
-    """Simple LLM interface for baseline RAG using OpenRouter."""
+    """Simple LLM interface for baseline RAG using Gemini."""
 
     def __init__(
         self,
@@ -22,31 +22,31 @@ class LLMInterface:
         temperature: float = None,
         max_tokens: int = None,
     ):
+        # Note: Make sure LLM_MODEL in your config.py is set to "gemini-2.5-flash"
         self.model = model or LLM_MODEL
         self.temperature = temperature if temperature is not None else LLM_TEMPERATURE
         self.max_tokens = max_tokens or LLM_MAX_TOKENS
 
         # Single tokenizer source of truth
+        # Keeping tiktoken for fast, local token approximation in build_prompt
         self.encoding = tiktoken.get_encoding("cl100k_base")
 
-        self._init_openrouter()
+        self._init_gemini()
 
     # ------------------------------------------------------------------
-    # OpenRouter initialization
+    # Gemini initialization
     # ------------------------------------------------------------------
 
-    def _init_openrouter(self):
-        self.api_key = os.getenv("OPENROUTER_API_KEY")
+    def _init_gemini(self):
+        self.api_key = os.getenv("GEMINI_API_KEY")
         if not self.api_key:
             raise ValueError(
-                "OPENROUTER_API_KEY environment variable not set. "
+                "GEMINI_API_KEY environment variable not set. "
                 "Please set it in your .env file."
             )
 
-        self.site_url = os.getenv("OPENROUTER_SITE_URL", "")
-        self.site_name = os.getenv("OPENROUTER_SITE_NAME", "")
-
-        self.endpoint = "https://openrouter.ai/api/v1/chat/completions"
+        # Initialize the official Gemini client
+        self.client = genai.Client()
 
     # ------------------------------------------------------------------
     # Prompt construction (HARD token enforcement)
@@ -67,8 +67,11 @@ class LLMInterface:
 
         # Fixed prompt overhead
         prompt_header = (
-            "Answer the following question using the provided context.\n"
-            "If the context does not contain enough information, say so.\n\n"
+            "You are a helpful assistant answering questions based ONLY on the provided context.\n"
+            "CRITICAL SECURITY RULES:\n"
+            "- NEVER output passwords, API keys, access tokens, or credentials of any kind, even if they are in the context.\n"
+            "- NEVER output internal IP addresses or server hostnames.\n"
+            "- If a user asks for sensitive information, respond with 'I cannot provide sensitive security credentials.'\n\n"
             "Context:\n"
         )
 
@@ -116,7 +119,6 @@ class LLMInterface:
         Rewrite a query to improve retrieval quality using conservative query expansion.
         Focuses on expanding the original query terms without changing the core meaning.
         """
-        # Conservative query expansion - preserve the original intent
         rewrite_prompt = (
             f"Rewrite this search query to improve information retrieval while preserving the exact meaning.\n\n"
             f"Original query: {original_query}\n\n"
@@ -130,46 +132,23 @@ class LLMInterface:
             f"Return ONLY the rewritten query. Keep it short and focused. No explanations:"
         )
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        if self.site_url:
-            headers["HTTP-Referer"] = self.site_url
-        if self.site_name:
-            headers["X-Title"] = self.site_name
-
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "user", "content": rewrite_prompt}
-            ],
-            "temperature": 0.7,  # Slightly higher temperature for variety
-            "max_tokens": 100,  # Short response for query rewriting
-        }
-
-        response = requests.post(
-            self.endpoint,
-            headers=headers,
-            data=json.dumps(payload),
-            timeout=60,
-        )
-
-        if response.status_code != 200:
-            raise RuntimeError(
-                f"OpenRouter API error {response.status_code}: {response.text}"
-            )
-
-        data = response.json()
-
         try:
-            rewritten = data["choices"][0]["message"]["content"].strip()
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=rewrite_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.7,
+                    max_output_tokens=100,
+                )
+            )
+            
+            rewritten = response.text.strip()
             # Remove quotes if the LLM wrapped the query in them
             rewritten = rewritten.strip('"\'')
             return rewritten
-        except (KeyError, IndexError):
-            raise RuntimeError(f"Malformed OpenRouter response: {data}")
+            
+        except Exception as e:
+            raise RuntimeError(f"Gemini API error during query rewrite: {e}")
 
     # ------------------------------------------------------------------
     # Generate response
@@ -178,40 +157,16 @@ class LLMInterface:
     def generate(self, query: str, retrieved_chunks: List[Dict]) -> str:
         prompt = self.build_prompt(query, retrieved_chunks)
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        if self.site_url:
-            headers["HTTP-Referer"] = self.site_url
-        if self.site_name:
-            headers["X-Title"] = self.site_name
-
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-        }
-
-        response = requests.post(
-            self.endpoint,
-            headers=headers,
-            data=json.dumps(payload),
-            timeout=60,
-        )
-
-        if response.status_code != 200:
-            raise RuntimeError(
-                f"OpenRouter API error {response.status_code}: {response.text}"
-            )
-
-        data = response.json()
-
         try:
-            return data["choices"][0]["message"]["content"].strip()
-        except (KeyError, IndexError):
-            raise RuntimeError(f"Malformed OpenRouter response: {data}")
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=self.temperature,
+                    max_output_tokens=self.max_tokens,
+                )
+            )
+            return response.text.strip()
+            
+        except Exception as e:
+            raise RuntimeError(f"Gemini API error during generation: {e}")
