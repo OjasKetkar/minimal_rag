@@ -4,8 +4,13 @@ A minimal RAG (Retrieval-Augmented Generation) system designed as a research bas
 
 ## Purpose
 
-Modern RAGs often assume that more retrieved contexts implies better answers. In reallity, this assumption fails due to the constraint on availability of RAM/VRAM for LLM inference, where only a finite amount of retrieved info can be loaded into the memory (KV cache). 
-The project investigates how memory constraint affect RAG behabour and demonstrates how agentic control can be used to adapt retrieval strategies, rather than blindly increasing context size.
+Modern RAGs often assume that more retrieved contexts imply better answers, and that internal environments are implicitly safe. In reality, these assumptions fail due to two major constraints:
+
+Memory Bounds: A finite amount of retrieved info can be loaded into the LLM's KV cache.
+
+Security & Privacy Bounds: Exposing raw vector databases to LLMs introduces critical Data Exfiltration and Prompt Injection vulnerabilities.
+
+This project investigates how memory constraints affect RAG behavior and demonstrates how agentic control and a Defense-in-Depth Security Perimeter can be used to adapt retrieval strategies while mathematically guaranteeing data privacy.
 
 ## Quick Reference: Baseline Parameters
 
@@ -19,68 +24,76 @@ The project investigates how memory constraint affect RAG behabour and demonstra
 | **Max output tokens** | 500 |
 | **Agentic Behaviour** | Confidence-driven retry and strategy adaptation |
 | **Memory optimization** | Explicit short-term memory management (context-aware) |
+| **Inbound Security** | Hybrid WAF (DeBERTa-v3 Semantic ML + Deterministic Regex) |
+| **Data Privacy** | In-memory Data Vault (Regex PII Masking & Tokenization) |
+| **Egress Security** | Zero-Trust RBAC Rehydration |
 
 
 ## Key System Behaviours
 
 - **Memory Pressure Simulation** : A fixed context token budget limits how much retrieved information can be passed to the LLM, modeling real GPU memory constraints.
-Finding: Increasing available context does not monotonically improve answer quality.
-- **Memory-Aware Selection** : Retrieved chunks are prioritized by semantic relevance. Under memory pressure, weaker chunks are deliberately discarded rather than accidentally truncated. Finding: Intentional memory allocation stabilizes outputs under large retrieval sizes.
+Finding: Increasing available context does not monotonically improve answer quality
+- **Memory-Aware Selection** : Raw database chunks are intercepted before hitting the LLM. Secrets (AWS keys, IPs) are replaced with synthetic tokens (e.g., <IP_ADDRESS_A1B2>).
+Finding: LLMs maintain semantic reasoning capabilities even when operating purely on tokenized synthetic data.
 - **Confidence Estimation** : Each answer is assigned a bounded confidence score derived from Evidence relevance (similarity scores), Context coverage, Stability under perturbation
 This confidence reflects support under constraints, not objective truth.
-- **Agentic Adaptation** : When confidence is low, the system : 
-
-Modifies its retrieval strategy (e.g., dynamic K, query rewrite) --> Retries once --> Selects the result with stronger evidence --> Signals uncertainty if improvement is not possible
-Finding: Agentic retries are bounded by semantic memory quality; more retrieval does not guarantee higher confidence.
+- **Agentic Adaptation** : When confidence is low, the system modifies its retrieval strategy (e.g., dynamic K). The confidence score derives from Evidence relevance, Context coverage, and Stability.
+- **Bi-Directional Security Perimeter** :
+    - Inbound: A Hybrid ML/Regex shield blocks persona hijacks (e.g., "I am the CEO") and prompt injections before database retrieval.
+    - Outbound: An RBAC (Role-Based Access Control) gate ensures synthetic tokens are only "rehydrated" into real secrets if the requesting user possesses cryptographic Admin authority.
 
 ## System Diagram
-
 ```
-                ┌──────────────────────────┐
-                │   Semantic Memory         │
-                │  (FAISS Vector Store)     │
-                │  Embedded Document Chunks │
-                └───────────┬──────────────┘
-                            │
-                        Retrieval (Top-K)
-                            │
-                ┌───────────▼──────────────┐
-                │   Memory Manager          │
-                │  - Context token budget   │
-                │  - Query vs context split │
-                └───────────┬──────────────┘
-                            │
-                ┌───────────▼──────────────┐
-                │  Chunk Prioritization     │
-                │  - Rank by relevance      │
-                │  - Drop weakest first     │
-                └───────────┬──────────────┘
-                            │
-                ┌───────────▼──────────────┐
-                │ Short-Term Memory         │
-                │ (Final Prompt Context)    │
-                └───────────┬──────────────┘
-                            │
-                ┌───────────▼──────────────┐
-                │        LLM                │
-                │  Deterministic (Temp=0)   │
-                └───────────┬──────────────┘
-                            │
-                        Answer
-                            │
-                ┌───────────▼──────────────┐
-                │ Confidence Estimation     │
-                │ - Evidence strength       │
-                │ - Context coverage        │
-                │ - Stability               │
-                └───────────┬──────────────┘
-                            │
-           ┌────────────────┴─────────────────┐
-           │                                   │
-  Confidence ≥ Threshold              Confidence < Threshold
-           │                                   │
-      Return Answer              Agentic Control Action
-                                   (Retry / Dynamic-K /
-                                    Query Rewrite / Warn)
-
+    ┌──────────────────────────┐
+    User Query ────►│  Hybrid Inbound Shield   │──[MALICIOUS]──► DROP & ALERT
+                    │ (Semantic ML + Regex)    │
+                    └───────────┬──────────────┘
+                                │ [SAFE]
+                    ┌───────────▼──────────────┐
+                    │   Semantic Memory        │
+                    │  (FAISS Vector Store)    │
+                    └───────────┬──────────────┘
+                                │ (Raw Chunks)
+                    ┌───────────▼──────────────┐
+                    │      Data Vault          │
+                    │ - Strip PII & Secrets    │
+                    │ - Inject <SYNTH_TOKENS>  │
+                    └───────────┬──────────────┘
+                                │ (Sanitized Chunks)
+                    ┌───────────▼──────────────┐
+                    │   Memory Manager &       │
+                    │ Chunk Prioritization     │
+                    └───────────┬──────────────┘
+                                │
+                    ┌───────────▼──────────────┐
+                    │ Short-Term Memory        │
+                    │ (System Prompt Hardened) │
+                    └───────────┬──────────────┘
+                                │
+                    ┌───────────▼──────────────┐
+                    │        LLM               │
+                    │  Deterministic (Temp=0)  │
+                    └───────────┬──────────────┘
+                                │ (Raw Answer with Tokens)
+                    ┌───────────▼──────────────┐
+                    │ Confidence Estimation    │
+                    └───────────┬──────────────┘
+                                │
+               ┌────────────────┴─────────────────┐
+               │                                  │
+      Confidence ≥ Threshold             Confidence < Threshold
+               │                                  │
+    ┌──────────▼─────────────────┐     Agentic Control Action
+    │ Zero-Trust Rehydration     │      (Retry / Dynamic-K /
+    │ (RBAC Evaluation)          │       Query Rewrite)
+    └──────────┬─────────────────┘
+               │
+          ┌────┴────┐
+       [ADMIN]   [STANDARD]
+          │         │
+      Unmask      Keep Tokens &
+      Secrets     Append Warning
+          │         │
+          ▼         ▼
+        Final User Output
 ```
