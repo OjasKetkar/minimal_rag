@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List, Dict
 import tiktoken  # for token counting
 
-from config import DOCUMENTS_DIR, CHUNK_SIZE, CHUNK_OVERLAP
+from rag.config import DOCUMENTS_DIR, CHUNK_SIZE, CHUNK_OVERLAP
 
 def load_text_file(file_path: Path) -> str:
     """Load text content from a file."""

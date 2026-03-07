@@ -10,7 +10,7 @@ from typing import Dict, Optional
 from datetime import datetime
 import tiktoken
 
-from config import METRICS_OUTPUT, LOG_QUERIES
+from rag.config import METRICS_OUTPUT, LOG_QUERIES
 
 
 class MetricsLogger:
