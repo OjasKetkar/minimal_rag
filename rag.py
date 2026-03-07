@@ -3,9 +3,10 @@ Main RAG orchestration module for minimal RAG baseline.
 Coordinates all components: ingestion, embedding, retrieval, and LLM generation.
 """
 
+import os
 import time
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Dict
 import tiktoken
 
 from config import DOCUMENTS_DIR, VECTOR_DB_PATH, CONTEXT_MAX_TOKENS
@@ -17,6 +18,9 @@ from metrics import MetricsLogger
 from memory_manager import MemoryManager
 
 from config import TOP_K
+
+
+from security.data_vault import DataVault
 
 class MinimalRAG:
     """
@@ -86,93 +90,122 @@ class MinimalRAG:
         print("Index built successfully.")
     
     def _run_rag_core(self, query: str, top_k: int = None) -> Dict:
-        """
-        Core RAG execution logic.
-        Returns answer, evidence_score, filtered_chunks, memory_manager, and other metadata.
-        """
-        # Initialize memory manager for token budget tracking
-        memory_manager = MemoryManager(max_tokens=CONTEXT_MAX_TOKENS)
-        encoding = tiktoken.get_encoding("cl100k_base")
-        
-        # Retrieve relevant chunks (tracks query tokens, but not context tokens yet)
-        retrieved_chunks = self.retriever.retrieve(query, top_k, memory_manager=memory_manager, record_context_tokens=False)
-        
-        # Sort chunks by similarity score (descending) - highest similarity first
-        # This ensures we prioritize the most relevant chunks when memory is limited
-        retrieved_chunks.sort(key=lambda x: x.get("similarity_score", 0.0), reverse=True)
-        
-        # Calculate prompt overhead tokens (header + footer with query)
-        # This matches what build_prompt will use
-        prompt_header = (
-            "Answer the following question using the provided context.\n"
-            "If the context does not contain enough information, say so.\n\n"
-            "Context:\n"
-        )
-        prompt_footer = f"\n\nQuestion: {query}\n\nAnswer:"
-        header_tokens = len(encoding.encode(prompt_header))
-        footer_tokens = len(encoding.encode(prompt_footer))
-        prompt_overhead = header_tokens + footer_tokens
-        
-        # Available tokens for context chunks = total budget - prompt overhead
-        # Note: query tokens are already recorded in memory_manager, but footer includes query
-        # So we use CONTEXT_MAX_TOKENS directly and subtract overhead
-        available_for_chunks = CONTEXT_MAX_TOKENS - prompt_overhead
-        if available_for_chunks <= 0:
-            raise ValueError(f"CONTEXT_MAX_TOKENS ({CONTEXT_MAX_TOKENS}) too small for prompt structure (overhead: {prompt_overhead})")
-        
-        # Filter chunks based on remaining token budget
-        # Account for formatting tokens that build_prompt will add: "[Context {i}]\n" and "\n"
-        filtered_chunks = []
-        used_context_tokens = 0
-        
-        for i, chunk in enumerate(retrieved_chunks, 1):
-            # Count tokens including the formatting that build_prompt will add
-            chunk_text_with_formatting = f"[Context {i}]\n{chunk['text']}\n"
-            chunk_token_count = len(encoding.encode(chunk_text_with_formatting))
-            
-            if used_context_tokens + chunk_token_count <= available_for_chunks:
-                filtered_chunks.append(chunk)
-                used_context_tokens += chunk_token_count
-                # Record context tokens (just the chunk text, not formatting, for memory_manager tracking)
-                chunk_text_only_tokens = len(encoding.encode(chunk["text"]))
-                memory_manager.record(
-                    "context",
-                    chunk_text_only_tokens,
-                    metadata={"chunk_id": chunk.get("chunk_index", -1), "score": chunk.get("similarity_score", 0.0)}
-                )
+            """
+            Core RAG execution logic.
+            Returns answer, evidence_score, filtered_chunks, memory_manager, and other metadata.
+            """
+            # Initialize memory manager for token budget tracking
+            memory_manager = MemoryManager(max_tokens=CONTEXT_MAX_TOKENS)
+            encoding = tiktoken.get_encoding("cl100k_base")
+
+            # Retrieve relevant chunks (tracks query tokens, but not context tokens yet)
+            retrieved_chunks = self.retriever.retrieve(query, top_k, memory_manager=memory_manager, record_context_tokens=False)
+
+            # Sort chunks by similarity score (descending) - highest similarity first
+            # This ensures we prioritize the most relevant chunks when memory is limited
+            retrieved_chunks.sort(key=lambda x: x.get("similarity_score", 0.0), reverse=True)
+
+            # Calculate prompt overhead tokens (header + footer with query)
+            # This matches what build_prompt will use
+            prompt_header = (
+                "Answer the following question using the provided context.\n"
+                "If the context does not contain enough information, say so.\n\n"
+                "Context:\n"
+            )
+            prompt_footer = f"\n\nQuestion: {query}\n\nAnswer:"
+            header_tokens = len(encoding.encode(prompt_header))
+            footer_tokens = len(encoding.encode(prompt_footer))
+            prompt_overhead = header_tokens + footer_tokens
+
+            # Available tokens for context chunks = total budget - prompt overhead
+            # Note: query tokens are already recorded in memory_manager, but footer includes query
+            # So we use CONTEXT_MAX_TOKENS directly and subtract overhead
+            available_for_chunks = CONTEXT_MAX_TOKENS - prompt_overhead
+            if available_for_chunks <= 0:
+                raise ValueError(f"CONTEXT_MAX_TOKENS ({CONTEXT_MAX_TOKENS}) too small for prompt structure (overhead:  {prompt_overhead})")
+
+            # Filter chunks based on remaining token budget
+            # Account for formatting tokens that build_prompt will add: "[Context {i}]\n" and "\n"
+            filtered_chunks = []
+            used_context_tokens = 0
+
+            for i, chunk in enumerate(retrieved_chunks, 1):
+                # Count tokens including the formatting that build_prompt will add
+                chunk_text_with_formatting = f"[Context {i}]\n{chunk['text']}\n"
+                chunk_token_count = len(encoding.encode(chunk_text_with_formatting))
+
+                if used_context_tokens + chunk_token_count <= available_for_chunks:
+                    filtered_chunks.append(chunk)
+                    used_context_tokens += chunk_token_count
+                    # Record context tokens (just the chunk text, not formatting, for memory_manager tracking)
+                    chunk_text_only_tokens = len(encoding.encode(chunk["text"]))
+                    memory_manager.record(
+                        "context",
+                        chunk_text_only_tokens,
+                        metadata={"chunk_id": chunk.get("chunk_index", -1), "score": chunk.get("similarity_score", 0.0)}
+                    )
+                else:
+                    # Chunk doesn't fit in remaining budget - stop adding chunks
+                    # Lower similarity chunks are dropped first
+                    break
+                
+            # Calculate evidence strength: average similarity score of used chunks
+            # Normalize to 0-1 range (FAISS cosine similarity is already 0-1 for normalized vectors)
+            # Calculate evidence strength from retrieved chunks BEFORE budget filtering
+            if retrieved_chunks:
+                similarity_scores = [
+                    chunk.get("similarity_score", 0.0)
+                    for chunk in retrieved_chunks
+                    if chunk.get("similarity_score") is not None
+                ]
+
+                # Evidence = strongest grounding signal
+                evidence_score = max(similarity_scores) if similarity_scores else 0.0
             else:
-                # Chunk doesn't fit in remaining budget - stop adding chunks
-                # Lower similarity chunks are dropped first
-                break
-        
-        # Calculate evidence strength: average similarity score of used chunks
-        # Normalize to 0-1 range (FAISS cosine similarity is already 0-1 for normalized vectors)
-        # Calculate evidence strength from retrieved chunks BEFORE budget filtering
-        if retrieved_chunks:
-            similarity_scores = [
-                chunk.get("similarity_score", 0.0)
-                for chunk in retrieved_chunks
-                if chunk.get("similarity_score") is not None
-            ]
+                evidence_score = 0.0
 
-            # Evidence = strongest grounding signal
-            evidence_score = max(similarity_scores) if similarity_scores else 0.0
-        else:
-            evidence_score = 0.0
+            # Clamp for safety
+            evidence_score = max(0.0, min(1.0, evidence_score))
 
-        # Clamp for safety
-        evidence_score = max(0.0, min(1.0, evidence_score))
-        
-        # Generate answer using only filtered chunks that fit within budget
-        answer = self.llm.generate(query, filtered_chunks)
-        
-        return {
-            "answer": answer,
-            "evidence_score": evidence_score,
-            "filtered_chunks": filtered_chunks,
-            "memory_manager": memory_manager,
-            "retrieved_chunks": retrieved_chunks
-        }
+            # --- NEW SECURITY LAYER: DATA VAULT MASKING ---
+            vault = DataVault()
+
+            # Scrub the chunks before they go to the LLM
+            scrubbed_chunks = []
+            for chunk in filtered_chunks:
+                safe_chunk = chunk.copy() # Use copy so we don't permanently alter the chunk in memory
+                safe_chunk['text'] = vault.mask_text(chunk['text'])
+                scrubbed_chunks.append(safe_chunk)
+
+            # Mask the user's query too, just in case they typed a secret
+            safe_query = vault.mask_text(query)
+
+            # Generate answer using ONLY the scrubbed chunks and safe query
+            raw_answer = self.llm.generate(safe_query, scrubbed_chunks)
+
+            # --- LAYER 2.5: ZERO-TRUST REHYDRATION (RBAC) ---
+            # In a real app, you would extract this from a JWT token or session state.
+            # Let's hardcode the attacker/user as a standard employee for now.
+            current_user_role = os.getenv("CURRENT_USER_ROLE")  # Default to "employee" if not set
+
+            if current_user_role == "admin":
+                # Only authorized admins get the real secret bytes
+                answer = vault.unmask_text(raw_answer)
+            else:
+                # Everyone else gets the redacted tokens and a security notice
+                answer = raw_answer + "\n\n[SYSTEM NOTE: Sensitive data has been automatically redacted based on your current clearance     level.]"
+
+            # Clear the vault from memory to prevent cross-contamination
+            vault.clear_vault()
+            # ------------------------------------------------
+
+            return {
+                "answer": answer,
+                "evidence_score": evidence_score,
+                "filtered_chunks": filtered_chunks, # We return the original unmasked chunks to the user
+                "memory_manager": memory_manager,
+                "retrieved_chunks": retrieved_chunks
+            }
     
     def query(self, query: str, top_k: int = None) -> Dict:
         """
