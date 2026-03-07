@@ -1,20 +1,17 @@
 """
 LLM interface module for minimal RAG baseline.
-Handles prompt assembly and LLM API calls via Gemini.
+Handles prompt assembly and LLM API calls via local Ollama.
 """
 
-import os
 from typing import List, Dict
-
 import tiktoken
-from google import genai
-from google.genai import types
+import ollama
 
 from config import LLM_MODEL, LLM_TEMPERATURE, LLM_MAX_TOKENS, CONTEXT_MAX_TOKENS
 
 
 class LLMInterface:
-    """Simple LLM interface for baseline RAG using Gemini."""
+    """Simple LLM interface for baseline RAG using local Ollama."""
 
     def __init__(
         self,
@@ -22,7 +19,7 @@ class LLMInterface:
         temperature: float = None,
         max_tokens: int = None,
     ):
-        # Note: Make sure LLM_MODEL in your config.py is set to "gemini-2.5-flash"
+        # Note: Make sure LLM_MODEL in your config.py is set to "mistral"
         self.model = model or LLM_MODEL
         self.temperature = temperature if temperature is not None else LLM_TEMPERATURE
         self.max_tokens = max_tokens or LLM_MAX_TOKENS
@@ -30,23 +27,6 @@ class LLMInterface:
         # Single tokenizer source of truth
         # Keeping tiktoken for fast, local token approximation in build_prompt
         self.encoding = tiktoken.get_encoding("cl100k_base")
-
-        self._init_gemini()
-
-    # ------------------------------------------------------------------
-    # Gemini initialization
-    # ------------------------------------------------------------------
-
-    def _init_gemini(self):
-        self.api_key = os.getenv("GEMINI_API_KEY")
-        if not self.api_key:
-            raise ValueError(
-                "GEMINI_API_KEY environment variable not set. "
-                "Please set it in your .env file."
-            )
-
-        # Initialize the official Gemini client
-        self.client = genai.Client()
 
     # ------------------------------------------------------------------
     # Prompt construction (HARD token enforcement)
@@ -65,7 +45,7 @@ class LLMInterface:
         # Use provided max_tokens or fall back to CONTEXT_MAX_TOKENS
         token_limit = max_tokens if max_tokens is not None else CONTEXT_MAX_TOKENS
 
-        # Fixed prompt overhead
+        # Fixed prompt overhead with SECURITY RULES
         prompt_header = (
             "You are a helpful assistant answering questions based ONLY on the provided context.\n"
             "CRITICAL SECURITY RULES:\n"
@@ -133,22 +113,22 @@ class LLMInterface:
         )
 
         try:
-            response = self.client.models.generate_content(
+            response = ollama.generate(
                 model=self.model,
-                contents=rewrite_prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.7,
-                    max_output_tokens=100,
-                )
+                prompt=rewrite_prompt,
+                options={
+                    "temperature": 0.7,
+                    "num_predict": 100, 
+                }
             )
             
-            rewritten = response.text.strip()
+            rewritten = response['response'].strip()
             # Remove quotes if the LLM wrapped the query in them
             rewritten = rewritten.strip('"\'')
             return rewritten
             
         except Exception as e:
-            raise RuntimeError(f"Gemini API error during query rewrite: {e}")
+            raise RuntimeError(f"Ollama error during query rewrite. Is Ollama running? Error: {e}")
 
     # ------------------------------------------------------------------
     # Generate response
@@ -158,15 +138,15 @@ class LLMInterface:
         prompt = self.build_prompt(query, retrieved_chunks)
 
         try:
-            response = self.client.models.generate_content(
+            response = ollama.generate(
                 model=self.model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=self.temperature,
-                    max_output_tokens=self.max_tokens,
-                )
+                prompt=prompt,
+                options={
+                    "temperature": self.temperature,
+                    "num_predict": self.max_tokens,
+                }
             )
-            return response.text.strip()
+            return response['response'].strip()
             
         except Exception as e:
-            raise RuntimeError(f"Gemini API error during generation: {e}")
+            raise RuntimeError(f"Ollama error during generation. Is Ollama running? Error: {e}")
