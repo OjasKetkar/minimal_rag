@@ -9,15 +9,16 @@ from pathlib import Path
 from typing import Dict
 import tiktoken
 
-from config import DOCUMENTS_DIR, VECTOR_DB_PATH, CONTEXT_MAX_TOKENS
-from ingest import ingest_documents
-from embed import create_embeddings
-from retrieve import VectorRetriever
-from llm import LLMInterface
-from metrics import MetricsLogger
-from memory_manager import MemoryManager
+from rag.config import DOCUMENTS_DIR, VECTOR_DB_PATH, CONTEXT_MAX_TOKENS
+from rag.ingest import ingest_documents
+from rag.embed import create_embeddings
+from rag.retrieve import VectorRetriever
+from rag.llm import LLMInterface
+from rag.metrics import MetricsLogger
+from rag.memory_manager import MemoryManager
+from security.inbound_shield import InboundShield
 
-from config import TOP_K
+from rag.config import TOP_K
 
 
 from security.data_vault import DataVault
@@ -193,7 +194,7 @@ class MinimalRAG:
                 answer = vault.unmask_text(raw_answer)
             else:
                 # Everyone else gets the redacted tokens and a security notice
-                answer = raw_answer + "\n\n[SYSTEM NOTE: Sensitive data has been automatically redacted based on your current clearance     level.]"
+                answer = raw_answer + "\n\n[SYSTEM NOTE: Sensitive data has been automatically redacted based on your current clearance level.]"
 
             # Clear the vault from memory to prevent cross-contamination
             vault.clear_vault()
@@ -219,6 +220,23 @@ class MinimalRAG:
             Dictionary with answer and metadata
         """
         start_time = time.time()
+
+        # --- LAYER 4: THE INBOUND SHIELD (FRONT GATE) ---
+        shield = InboundShield()
+        if not shield.scan_query(query):
+            # Terminate the request instantly. Zero tokens spent. Zero DB queries.
+            return {
+                "query": query,
+                "answer": "SECURITY VIOLATION: Your query was blocked by the Agentic Firewall. Malicious intent or unauthorized role-playing detected.",
+                "retrieved_chunks": [],
+                "metrics": {
+                    "query_tokens": 0, "num_retrieved_chunks": 0, "context_tokens": 0,
+                    "prompt_tokens": 0, "answer_tokens": 0, "latency_seconds": time.time() - start_time
+                },
+                "memory_snapshot": {},
+                "evidence_score": 0.0
+            }
+        # ------------------------------------------------
         
         # Step 4: Agentic Decision-Making - Dynamic-K policy
         # Start with K=3, increase to K=6, then K=10 if confidence is low (max 2 retries)

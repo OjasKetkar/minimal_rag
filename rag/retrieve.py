@@ -10,8 +10,8 @@ import numpy as np
 import faiss
 import tiktoken
 
-from config import TOP_K, SIMILARITY_METRIC, VECTOR_DB_PATH, EMBEDDING_DIM
-from embed import Embedder
+from rag.config import TOP_K, SIMILARITY_METRIC, VECTOR_DB_PATH, EMBEDDING_DIM
+from rag.embed import Embedder
 
 
 class VectorRetriever:

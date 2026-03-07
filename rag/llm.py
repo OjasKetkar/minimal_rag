@@ -7,7 +7,7 @@ from typing import List, Dict
 import tiktoken
 import ollama
 
-from config import LLM_MODEL, LLM_TEMPERATURE, LLM_MAX_TOKENS, CONTEXT_MAX_TOKENS
+from rag.config import LLM_MODEL, LLM_TEMPERATURE, LLM_MAX_TOKENS, CONTEXT_MAX_TOKENS
 
 
 class LLMInterface:

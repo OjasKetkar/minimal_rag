@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 import numpy as np
 
-from config import EMBEDDING_MODEL, EMBEDDING_DIM, EMBEDDINGS_CACHE
+from rag.config import EMBEDDING_MODEL, EMBEDDING_DIM, EMBEDDINGS_CACHE
 
 
 class Embedder:
